@@ -209,6 +209,9 @@ module Fluent::Plugin
 
     def single_metric(_req)
       metric_name = _req.query.fetch('m', @default_metric)
+      if metric_name.kind_of?(Array)
+        metric_name = metric_name[0]
+      end
       repr = ''
       if @registry.exist?(metric_name.to_sym)
         metric = @registry.get(metric_name)
