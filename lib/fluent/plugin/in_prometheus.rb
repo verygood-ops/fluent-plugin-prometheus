@@ -12,8 +12,11 @@ module Fluent::Plugin
 
     config_param :bind, :string, default: '0.0.0.0'
     config_param :port, :integer, default: 24231
+    config_param :health_path, :string, default: '/health'
+    config_param :metric_path, :string, default: '/single'
     config_param :metrics_path, :string, default: '/metrics'
     config_param :aggregated_metrics_path, :string, default: '/aggregated_metrics'
+    config_param :default_metric, :string, default: 'default'
 
     desc 'Enable ssl configuration for the server'
     config_section :ssl, required: false, multi: false do
@@ -107,9 +110,12 @@ module Fluent::Plugin
                 end
 
       http_server_create_http_server(:in_prometheus_server, addr: @bind, port: @port, logger: log, proto: proto, tls_opts: tls_opt) do |server|
+        server.get(@health_path) { |_req| [200, {}, "OK"] }
+        server.get(@metric_path) { |_req| single_metric(_req) }
         server.get(@metrics_path) { |_req| all_metrics }
         server.get(@aggregated_metrics_path) { |_req| all_workers_metrics }
       end
+
     end
 
     def shutdown
@@ -162,6 +168,24 @@ module Fluent::Plugin
       end
 
       @webrick_server = WEBrick::HTTPServer.new(config)
+      @webrick_server.mount_proc(@health_path) do |_req, res|
+        res.body = "OK"
+        res.status = 200
+        res['Content-Type'] = header['Content-Type']
+        res.body = body
+        res
+      end
+
+      @webrick_server = WEBrick::HTTPServer.new(config)
+      @webrick_server.mount_proc(@metric_path) do |_req, res|
+        status, header, body = single_metric(_req)
+        res.status = status
+        res['Content-Type'] = header['Content-Type']
+        res.body = body
+        res
+      end
+
+      @webrick_server = WEBrick::HTTPServer.new(config)
       @webrick_server.mount_proc(@metrics_path) do |_req, res|
         status, header, body = all_metrics
         res.status = status
@@ -181,6 +205,18 @@ module Fluent::Plugin
       thread_create(:in_prometheus_webrick) do
         @webrick_server.start
       end
+    end
+
+    def single_metric(_req)
+      metric_name = _req.query.fetch('m', @default_metric)
+      repr = ''
+      if @registry.exist?(metric_name.to_sym)
+        metric = @registry.get(metric_name)
+        fake_registry = OpenStruct.new
+        fake_registry.metrics = [metric]
+        repr = ::Prometheus::Client::Formats::Text.marshal(fake_registry)
+      end
+      [200, { 'Content-Type' => ::Prometheus::Client::Formats::Text::CONTENT_TYPE }, repr]
     end
 
     def all_metrics
